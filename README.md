@@ -14,6 +14,7 @@ TODO
 * Refactor to hide github pagination in single fetch method
 * Think about teams members re-fetch
 * Think about database usage for storing scores/cache
+* Add timeout for network requests
 
 Config file
 -----------
