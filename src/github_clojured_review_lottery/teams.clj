@@ -1,5 +1,4 @@
 (ns github-clojured-review-lottery.teams
-  (:gen-class)
   (:require [clojure.string :as string])
   (:require [tentacles repos orgs users issues])
   (:require [github-clojured-review-lottery
@@ -36,41 +35,43 @@
          nil)
        (filter #(contains? teams-names %) (map :name repo-teams))))))
 
-(let [fetcher (fn [team]
-                (let [team-id (:id team)
-                      team-repos (github/request tentacles.orgs/list-team-repos team-id)]
-                  (map :full_name (remove :fork team-repos))))
-      all-repositories (set (flatten (pmap fetcher teams)))]
+(let [fetcher #(->> %
+                    :id
+                     (github/request tentacles.orgs/list-team-repos)
+                     (remove :fork)
+                     (map :full_name))
+      all-repositories (-> (pmap fetcher teams) flatten set)]
   (def ^:private repos-teams (atom (into {} (pmap #(vector % (fetch-teams-for-repo %)) all-repositories)))))
 
 (defn teams-for-repo [repo]
   (@repos-teams repo))
 
 (defn update-repo-teams [repo-full-name]
-  (let [fetched-teams (fetch-teams-for-repo repo-full-name)]
-    (if (not (nil? fetched-teams)) (swap! repos-teams assoc repo-full-name fetched-teams))))
+  (if-let [fetched-teams (fetch-teams-for-repo repo-full-name)]
+    (swap! repos-teams assoc repo-full-name fetched-teams)))
 
 (defn ^:private create-repo-labels-if-needed [repo-full-name]
   (let [[repo-owner repo-name] (string/split repo-full-name #"/" 2)
-        labels (github/request tentacles.issues/repo-labels repo-owner repo-name)
-        labels (into #{} (map :name labels))]
-    (if (not (contains? labels constants/in-review-label))
+        labels (->> (github/request tentacles.issues/repo-labels repo-owner repo-name)
+                    (map :name)
+                    (into #{}))]
+    (when-not (contains? labels constants/in-review-label)
       (github/request tentacles.issues/create-label repo-owner repo-name constants/in-review-label "eb6420"))
-    (if (not (contains? labels constants/reviewed-label))
+    (when-not (contains? labels constants/reviewed-label)
       (github/request tentacles.issues/create-label repo-owner repo-name constants/reviewed-label "00aa00"))))
 
 (defn filter-related-issues [issues]
   (let [repos (reduce #(conj %1 (get-in %2 [:repository :full_name])) #{} issues)
         denied-repo-checker (fn [repo]
-                              (if (nil? (@denied-repos repo))
+                              (if-not (@denied-repos repo)
                                 true
                                 (let [current-diff (- (.getTime (java.util.Date.)) (@denied-repos repo))
-                                      result (> current-diff constants/denied-repos-timeout)
-                                      _ (if result (swap! denied-repos dissoc repo))]
+                                      result (> current-diff constants/denied-repos-timeout)]
+                                  (when result (swap! denied-repos dissoc repo))
                                   result)))
-        repos (doall (filter denied-repo-checker repos))
+        repos (filter denied-repo-checker repos)
         _ (doall (pmap update-repo-teams repos))
-        repos (doall (filter #(nil? (@denied-repos %)) repos))
+        repos (filter #(nil? (@denied-repos %)) repos)
         _ (doall (pmap create-repo-labels-if-needed repos))
         all-checkable-repos (into #{} (keys @repos-teams))]
     (filter #(contains? all-checkable-repos (get-in % [:repository :full_name])) issues)))

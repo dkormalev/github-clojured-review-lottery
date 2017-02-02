@@ -22,11 +22,11 @@
     (reduce reducer {} issues)))
 
 (defn check-issues []
-  (while (constantly true)
+  (while true
     (println "Starting check at" (.toString (new java.util.Date)))
     (let [issues (-> (issues/issues-list)
-                     (teams/filter-related-issues)
-                     (issues-by-teams))
+                     teams/filter-related-issues
+                     issues-by-teams)
           mapper (fn [[team issues]]
                    (let [for-assignment (issues/issues-to-be-assigned issues)
                          for-check (issues/issues-to-be-checked-for-completed-review issues)
@@ -34,7 +34,7 @@
                      (doseq [issue for-assignment] (issues/assign-issue issue team))
                      (doseq [issue for-check] (issues/mark-issue-as-reviewed-if-needed issue))))]
       (doall (pmap mapper issues))
-      (utils/println "Current limit: " (tentacles.core/rate-limit  {:auth (str (settings/value :api-token) ":x-oauth-basic")}))
+      (utils/println "Current limit:" (tentacles.core/rate-limit  {:auth (str (settings/value :api-token) ":x-oauth-basic")}))
       (github/save-cache)
       (lottery/save-scores)
       (Thread/sleep (* 1000 (settings/value :interval))))))

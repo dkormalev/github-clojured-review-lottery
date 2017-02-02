@@ -1,5 +1,4 @@
 (ns github-clojured-review-lottery.github
-  (:gen-class)
   (:require [clojure.string :as string])
   (:require [tentacles.core])
   (:require [github-clojured-review-lottery.settings :as settings])
@@ -9,7 +8,7 @@
 (def ^:private map-types #{clojure.lang.PersistentArrayMap clojure.lang.PersistentHashMap})
 
 (defn ^:private do-single-request [request args]
-  (let [cache-key [(-> request (str) (string/split #"@" 2) (first)) args]
+  (let [cache-key [(-> request str (string/split #"@" 2) first) args]
         additional-options {:etag (get-in @cache [cache-key :etag])
                             :auth (str (settings/value :api-token) ":x-oauth-basic")}
         last-arg (last args)
@@ -19,9 +18,9 @@
         result (apply request full-args)]
     (if (= result :tentacles.core/not-modified)
       (get-in @cache [cache-key :result])
-      (let [etag (:etag (tentacles.core/api-meta result))]
+      (do
         (utils/println "Cache miss" request args)
-        (if (not (nil? etag))
+        (if-let [etag (:etag (tentacles.core/api-meta result))]
           (swap! cache assoc cache-key {:result result :etag etag}))
         result))))
 
