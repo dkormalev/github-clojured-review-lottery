@@ -9,49 +9,56 @@
              [lottery :as lottery]
              [github :as github]]))
 
+(def ^:private review-done-comment "+1")
+
+(defn ^:private contains-any-lottery-label? [{labels :labels}]
+  (as-> labels l
+        (map :name l)
+        (into #{} l)
+        (not-any? l [constants/in-review-label constants/reviewed-label])))
+
+(defn ^:private contains-in-review-label? [{labels :labels}]
+  (as-> labels l
+        (map :name l)
+        (into #{} l)
+        (contains? l constants/in-review-label)))
+
+(defn ^:private has-comments? [{comments :comments, :default {:comments 0}}]
+  (> comments 0))
+
 (defn issues-list []
-  (let [all-issues (github/request tentacles.issues/my-issues {:filter (if (settings/value :only-subscribed-issues) "subscribed" "all")})]
-    (filter #(and (:pull_request %) (not (get-in % [:repository :fork])) (= (:state %) "open")) all-issues)))
+  (->> {:filter (if (settings/value :only-subscribed-issues) "subscribed" "all")}
+       (github/request tentacles.issues/my-issues)
+       (filter #(and (:pull_request %)
+                     (not (get-in % [:repository :fork]))
+                     (= (:state %) "open")))))
 
 (defn assign-issue [{issue-id :number, issue-url :html_url,
                      {assignee :login} :assignee,
-                     {repo-name :name, {repo-owner :login} :owner} :repository :as issue}
+                     {repo-name :name, {repo-owner :login} :owner} :repository, :as issue}
                     team-name]
-  (let [options {:labels (list constants/in-review-label)}
-        options (if (nil? assignee)
-                  (assoc options :assignee (lottery/select-reviewer issue team-name))
-                  options)]
-    (if-not (nil? assignee)
-      (do
-        (lottery/increment-reviewer-score assignee)
-        (utils/println issue-url "already assigned to" assignee))
-      (utils/println "Assigning" issue-url "to" (:assignee options)))
+  (let [new-assignee (or assignee (lottery/select-reviewer issue team-name))
+        options {:labels (list constants/in-review-label), :assignee new-assignee}]
+    (if (nil? assignee)
+      (utils/println "Assigning" issue-url "to" new-assignee)
+      (utils/println issue-url "already assigned to" assignee))
+    (lottery/increment-reviewer-score new-assignee)
     (github/request tentacles.issues/edit-issue repo-owner repo-name issue-id options)))
 
 (defn mark-issue-as-reviewed-if-needed [{issue-id :number, issue-url :html_url,
                                          {assignee :login} :assignee,
                                          {repo-name :name, {repo-owner :login} :owner} :repository}]
-  (let [comments (github/request tentacles.issues/issue-comments repo-owner repo-name issue-id)
-        has-review-done-comment (and (not (nil? assignee))
-                                     (some #(and (= (get-in % [:user :login]) assignee)
-                                                 (= (string/trim (:body %)) constants/review-done-comment))
-                                           comments))]
-    (if has-review-done-comment
-      (do
-        (utils/println issue-url "successfully reviewed by" assignee)
-        (github/request tentacles.issues/edit-issue repo-owner repo-name issue-id {:labels (list constants/reviewed-label)}))
-      (utils/println issue-url "still not reviewed by" assignee))))
+  (when-not (nil? assignee)
+    (when (->> (github/request tentacles.issues/issue-comments repo-owner repo-name issue-id)
+               (some #(and (= (get-in % [:user :login]) assignee)
+                           (= (string/trim (:body %)) review-done-comment))))
+      (utils/println issue-url "successfully reviewed by" assignee)
+      (github/request tentacles.issues/edit-issue
+                      repo-owner repo-name issue-id
+                      {:labels (list constants/reviewed-label)}))))
 
 (defn issues-to-be-assigned [issues]
-  (let [selector (fn [{:keys [labels]}]
-                   (let [labels (into #{} (map :name labels))]
-                     (and (not (contains? labels constants/in-review-label))
-                          (not (contains? labels constants/reviewed-label)))))]
-    (filter selector issues)))
+  (filter contains-any-lottery-label? issues))
 
 (defn issues-to-be-checked-for-completed-review [issues]
-  (let [selector (fn [{:keys [labels comments] or {:labels nil :comments 0}}]
-                   (let [labels (into #{} (map :name labels))]
-                     (and (contains? labels constants/in-review-label)
-                          (> comments 0))))]
-    (filter selector issues)))
+  (filter #(and (contains-in-review-label? %) (has-comments? %)) issues))

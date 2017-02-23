@@ -7,48 +7,53 @@
              [settings :as settings]
              [github :as github]]))
 
+(def ^:private denied-repos-timeout (* 1000 60 60))
+
+(def ^:private teams-for-repos (atom {}))
 (def ^:private denied-repos (atom {}))
 
-(let [all-user-teams (github/request tentacles.users/my-teams)]
+(let [all-user-teams (github/request tentacles.users/my-teams)
+      ubers-filter (fn [{team-name :name}]
+                     (= team-name (settings/value :uber-team)))]
   (def ^:private teams (filter #(some #{(:name %)} (settings/value :teams)) all-user-teams))
-  (def ^:private uber-team (first (filter #(= (:name %) (settings/value :uber-team)) all-user-teams)))
-  (def ^:private teams-names (set (map :name teams))))
+  (def ^:private uber-team (->> all-user-teams
+                                (filter ubers-filter)
+                                first))
+  (def ^:private teams-names (->> teams
+                                  (map :name)
+                                  set)))
 
 (let [me (:login (github/request tentacles.users/me))
       ubers (set (map :login (github/request tentacles.orgs/team-members (:id uber-team))))
-      members-fetcher (fn [team]
-                        (let [team-name (:name team)
-                              members (github/request tentacles.orgs/team-members (:id team))]
+      members-fetcher (fn [{team-name :name, team-id :id}]
+                        (let [members (github/request tentacles.orgs/team-members team-id)]
                           [team-name (filter #(not= (:login %) me) members)]))]
   (def teams-members (into {} (pmap members-fetcher teams)))
   (def teams-ubers (into {} (for [[team-name members] teams-members]
                               [team-name (filter #(contains? ubers (:login %)) members)]))))
 
-(defn ^:private fetch-teams-for-repo
-  ([repo-full-name] (let [[repo-owner repo-name] (string/split repo-full-name #"/" 2)] (fetch-teams-for-repo repo-owner repo-name)))
+(defn ^:private raw-http-data? [c]
+  (not (and (nil? (:status c))
+            (nil? (:headers c))
+            (nil? (:body c)))))
+
+(defn ^:private repo->teams
+  ([repo-full-name]
+   (let [[repo-owner repo-name] (string/split repo-full-name #"/" 2)]
+     (repo->teams repo-owner repo-name)))
   ([repo-owner repo-name]
    (let [repo-teams (github/request tentacles.repos/teams repo-owner repo-name)]
-     (if (and (:body repo-teams) (:headers repo-teams) (:status repo-teams))
-       (let [full-name (str repo-owner "/" repo-name)
-             current-date (.getTime (java.util.Date.))]
-         (swap! denied-repos assoc full-name current-date)
+     (if (raw-http-data? repo-teams)
+       (let [full-name (str repo-owner "/" repo-name)]
+         (swap! denied-repos assoc full-name (.getTime (java.util.Date.)))
          nil)
        (filter #(contains? teams-names %) (map :name repo-teams))))))
 
-(let [fetcher #(->> %
-                    :id
-                     (github/request tentacles.orgs/list-team-repos)
-                     (remove :fork)
-                     (map :full_name))
-      all-repositories (-> (pmap fetcher teams) flatten set)]
-  (def ^:private repos-teams (atom (into {} (pmap #(vector % (fetch-teams-for-repo %)) all-repositories)))))
-
-(defn teams-for-repo [repo]
-  (@repos-teams repo))
-
-(defn update-repo-teams [repo-full-name]
-  (if-let [fetched-teams (fetch-teams-for-repo repo-full-name)]
-    (swap! repos-teams assoc repo-full-name fetched-teams)))
+(defn ^:private team->repos [{team-id :id}]
+  (->> team-id
+       (github/request tentacles.orgs/list-team-repos)
+       (remove :fork)
+       (map :full_name)))
 
 (defn ^:private create-repo-labels-if-needed [repo-full-name]
   (let [[repo-owner repo-name] (string/split repo-full-name #"/" 2)
@@ -56,22 +61,47 @@
                     (map :name)
                     (into #{}))]
     (when-not (contains? labels constants/in-review-label)
-      (github/request tentacles.issues/create-label repo-owner repo-name constants/in-review-label "eb6420"))
+      (github/request tentacles.issues/create-label
+                      repo-owner repo-name
+                      constants/in-review-label "eb6420"))
     (when-not (contains? labels constants/reviewed-label)
-      (github/request tentacles.issues/create-label repo-owner repo-name constants/reviewed-label "00aa00"))))
+      (github/request tentacles.issues/create-label
+                      repo-owner repo-name
+                      constants/reviewed-label "00aa00")))
+  repo-full-name)
+
+(defn ^:private repo-denied? [repo-name]
+  (if-not (@denied-repos repo-name)
+    false
+    (let [current-diff (- (.getTime (java.util.Date.)) (@denied-repos repo-name))
+          still-denied? (< current-diff denied-repos-timeout)]
+      (when-not still-denied? (swap! denied-repos dissoc repo-name))
+      still-denied?)))
+
+(defn teams-for-repo [repo]
+  (@teams-for-repos repo))
+
+(defn update-repo-teams [repo-full-name]
+  (if-let [fetched-teams (repo->teams repo-full-name)]
+    (swap! teams-for-repos assoc repo-full-name fetched-teams))
+  repo-full-name)
 
 (defn filter-related-issues [issues]
-  (let [repos (reduce #(conj %1 (get-in %2 [:repository :full_name])) #{} issues)
-        denied-repo-checker (fn [repo]
-                              (if-not (@denied-repos repo)
-                                true
-                                (let [current-diff (- (.getTime (java.util.Date.)) (@denied-repos repo))
-                                      result (> current-diff constants/denied-repos-timeout)]
-                                  (when result (swap! denied-repos dissoc repo))
-                                  result)))
-        repos (filter denied-repo-checker repos)
-        _ (doall (pmap update-repo-teams repos))
-        repos (filter #(nil? (@denied-repos %)) repos)
-        _ (doall (pmap create-repo-labels-if-needed repos))
-        all-checkable-repos (into #{} (keys @repos-teams))]
+  (let [repos (->> issues
+                   (map #(get-in % [:repository :full_name]))
+                   (into #{})
+                   (remove repo-denied?)
+                   (pmap update-repo-teams)
+                   doall
+                   (filter #(nil? (@denied-repos %)))
+                   (pmap create-repo-labels-if-needed)
+                   doall)
+        all-checkable-repos (into #{} (keys @teams-for-repos))]
     (filter #(contains? all-checkable-repos (get-in % [:repository :full_name])) issues)))
+
+(reset! teams-for-repos (as-> teams x
+                          (pmap team->repos x)
+                          (flatten x)
+                          (set x)
+                          (pmap #(vector % (repo->teams %)) x)
+                          (into {} x)))

@@ -9,38 +9,37 @@
              [issues :as issues]
              [github :as github]]))
 
-(defn issues-by-teams [issues]
-  ; Think about randomizing across teams associated with repo or something like it
-  (let [reducer (fn [acc issue]
-                  (let [repo-name (get-in issue [:repository :full_name])
-                        team (first (teams/teams-for-repo repo-name))
-                        team-issues (acc team)]
-                    (cond
-                      (nil? team) acc
-                      (nil? team-issues) (assoc acc team [issue])
-                      :default (update acc team conj issue))))]
-    (reduce reducer {} issues)))
+(defn issues-reducer [acc issue]
+  (let [repo-name (get-in issue [:repository :full_name])
+        team (first (teams/teams-for-repo repo-name))
+        team-issues (acc team)]
+    (cond
+      (nil? team) acc
+      (nil? team-issues) (assoc acc team [issue])
+      :default (update acc team conj issue))))
+
+(defn issues-mapper [[team issues]]
+  (let [for-assignment (issues/issues-to-be-assigned issues)
+        for-check (issues/issues-to-be-checked-for-completed-review issues)]
+    (utils/println team ":" (vec (map :html_url for-assignment)) (vec (map :html_url for-check)))
+    (doseq [issue for-assignment] (issues/assign-issue issue team))
+    (doseq [issue for-check] (issues/mark-issue-as-reviewed-if-needed issue))))
 
 (defn check-issues []
-  (while true
-    (println "Starting check at" (.toString (new java.util.Date)))
-    (let [issues (-> (issues/issues-list)
-                     teams/filter-related-issues
-                     issues-by-teams)
-          mapper (fn [[team issues]]
-                   (let [for-assignment (issues/issues-to-be-assigned issues)
-                         for-check (issues/issues-to-be-checked-for-completed-review issues)
-                         _ (utils/println team ":" (vec (map :html_url for-assignment)) (vec (map :html_url for-check)))]
-                     (doseq [issue for-assignment] (issues/assign-issue issue team))
-                     (doseq [issue for-check] (issues/mark-issue-as-reviewed-if-needed issue))))]
-      (doall (pmap mapper issues))
-      (utils/println "Current limit:" (tentacles.core/rate-limit  {:auth (str (settings/value :api-token) ":x-oauth-basic")}))
-      (github/save-cache)
-      (lottery/save-scores)
-      (Thread/sleep (* 1000 (settings/value :interval))))))
+  (println "Starting check at" (.toString (new java.util.Date)))
+  (->> (issues/issues-list)
+       teams/filter-related-issues
+       (reduce issues-reducer {})
+       (pmap issues-mapper)
+       doall))
 
 (defn -main [& args]
   (println "Teams:" (map #(vector (first %) (map :login (second %))) teams/teams-members))
   (println "Ubers:" (map #(vector (first %) (map :login (second %))) teams/teams-ubers))
-  (check-issues)
+  (while true
+    (check-issues)
+    (github/save-cache)
+    (lottery/save-scores)
+    (println "Current limit:" (tentacles.core/rate-limit {:auth (str (settings/value :api-token) ":x-oauth-basic")}))
+    (Thread/sleep (* 1000 (settings/value :interval))))
   (shutdown-agents))
