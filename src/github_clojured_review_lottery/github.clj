@@ -16,7 +16,6 @@
                     (concat (drop-last args) (list (merge last-arg additional-options)))
                     (concat args (list additional-options)))
         result (apply request full-args)]
-    (utils/println "request" request args)
     (if (= result :tentacles.core/not-modified)
       (get-in @cache [cache-key :result])
       (do
@@ -47,15 +46,17 @@
          result (do-single-request request (fill-args args 1))
          final-result (list)
          last-etag ""]
-    (cond
-      (and (filled-list? result)
-           (not= (:etag (tentacles.core/api-meta result)) last-etag)
-           (no-raw-http-data? result)) (recur (inc page)
-                                              (do-single-request request (fill-args args (inc page)))
-                                              (concat final-result result)
-                                              (:etag (tentacles.core/api-meta result)))
-      (and (empty? final-result) (= page 1)) result
-      :default final-result)))
+    (let [current-etag (:etag (tentacles.core/api-meta result))]
+      (cond
+        (and (filled-list? result)
+             (not= current-etag last-etag)
+             (no-raw-http-data? result)) (recur (inc page)
+                                                (do-single-request request (fill-args args (inc page)))
+                                                (concat final-result result)
+                                                current-etag)
+        (and (empty? final-result) (= page 1)) result
+        :default final-result)
+      )))
 
 (defn load-cache []
   (reset! cache

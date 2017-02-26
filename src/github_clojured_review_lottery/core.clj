@@ -11,7 +11,7 @@
 
 (defn issues-reducer [acc issue]
   (let [repo-name (get-in issue [:repository :full_name])
-        team (first (teams/teams-for-repo repo-name))
+        team (-> repo-name teams/teams-for-repo first)
         team-issues (acc team)]
     (cond
       (nil? team) acc

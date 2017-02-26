@@ -21,10 +21,14 @@
                                 first))
   (def ^:private teams-names (->> teams
                                   (map :name)
-                                  set)))
+                                  (into #{}))))
 
 (let [me (:login (github/request tentacles.users/me))
-      ubers (set (map :login (github/request tentacles.orgs/team-members (:id uber-team))))
+      ubers (->> uber-team
+                 :id
+                 (github/request tentacles.orgs/team-members)
+                 (map :login)
+                 (into #{}))
       members-fetcher (fn [{team-name :name, team-id :id}]
                         (let [members (github/request tentacles.orgs/team-members team-id)]
                           [team-name (filter #(not= (:login %) me) members)]))]
@@ -87,21 +91,22 @@
   repo-full-name)
 
 (defn filter-related-issues [issues]
-  (let [repos (->> issues
-                   (map #(get-in % [:repository :full_name]))
-                   (into #{})
-                   (remove repo-denied?)
-                   (pmap update-repo-teams)
-                   doall
-                   (filter #(nil? (@denied-repos %)))
-                   (pmap create-repo-labels-if-needed)
-                   doall)
-        all-checkable-repos (into #{} (keys @teams-for-repos))]
-    (filter #(contains? all-checkable-repos (get-in % [:repository :full_name])) issues)))
+  (->> issues
+       (map #(get-in % [:repository :full_name]))
+       (into #{})
+       (remove repo-denied?)
+       (pmap update-repo-teams)
+       (filter #(nil? (@denied-repos %)))
+       (pmap create-repo-labels-if-needed)
+       doall)
+  (let [all-checkable-repos (into #{} (keys @teams-for-repos))
+        issue-related? (fn [{{repo-name :full_name} :repository}]
+                         (all-checkable-repos repo-name))]
+    (filter issue-related? issues)))
 
-(reset! teams-for-repos (as-> teams x
-                          (pmap team->repos x)
-                          (flatten x)
-                          (set x)
-                          (pmap #(vector % (repo->teams %)) x)
-                          (into {} x)))
+(reset! teams-for-repos (->> teams
+                             (pmap team->repos)
+                             flatten
+                             (into #{})
+                             (pmap #(vector % (repo->teams %)))
+                             (into {})))
